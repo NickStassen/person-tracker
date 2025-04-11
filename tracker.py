@@ -58,7 +58,7 @@ def detect_and_track():
                             best_box = (x1, y1, x2 - x1, y2 - y1)
 
                 if best_box:
-                    tracker = cv2.TrackerKCF_create()
+                    tracker = cv2.TrackerMOSSE_create()
                     tracker.init(frame, best_box)
                     with bbox_lock:
                         last_bbox = best_box
