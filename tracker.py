@@ -1,6 +1,7 @@
 import cv2
 from flask import Flask, Response
 import threading
+import time
 
 """
 Headless real-time person detection and tracking using MobileNet-SSD + KCF,
@@ -18,6 +19,7 @@ DETECTION_INTERVAL = 15  # Detect every N frames
 
 net = cv2.dnn.readNetFromCaffe(CONFIG_PATH, MODEL_PATH)
 cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FPS, 10)  # Optional, some Pi camera drivers respect this
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
@@ -32,62 +34,75 @@ def detect_and_track():
     global output_frame, lock, tracker, frame_count
 
     while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            continue
+        try:
+            ret, frame = cap.read()
+            if not ret:
+                continue
 
-        frame_count += 1
+            frame_count += 1
 
-        if frame_count % DETECTION_INTERVAL == 0 or tracker is None:
-            blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843,
-                                         (300, 300), 127.5)
-            net.setInput(blob)
-            detections = net.forward()
-            h, w = frame.shape[:2]
-            max_conf = 0
-            best_box = None
+            if frame_count % DETECTION_INTERVAL == 0 or tracker is None:
+                blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843,
+                                             (300, 300), 127.5)
+                net.setInput(blob)
+                detections = net.forward()
+                h, w = frame.shape[:2]
+                max_conf = 0
+                best_box = None
 
-            for i in range(detections.shape[2]):
-                confidence = detections[0, 0, i, 2]
-                class_id = int(detections[0, 0, i, 1])
+                for i in range(detections.shape[2]):
+                    confidence = detections[0, 0, i, 2]
+                    class_id = int(detections[0, 0, i, 1])
 
-                if confidence > CONFIDENCE_THRESHOLD and CLASS_NAMES[class_id] == "person":
-                    box = detections[0, 0, i, 3:7] * [w, h, w, h]
-                    (x1, y1, x2, y2) = box.astype("int")
-                    if confidence > max_conf:
-                        max_conf = confidence
-                        best_box = (x1, y1, x2 - x1, y2 - y1)
+                    if confidence > CONFIDENCE_THRESHOLD and CLASS_NAMES[class_id] == "person":
+                        box = detections[0, 0, i, 3:7] * [w, h, w, h]
+                        (x1, y1, x2, y2) = box.astype("int")
+                        if confidence > max_conf:
+                            max_conf = confidence
+                            best_box = (x1, y1, x2 - x1, y2 - y1)
 
-            if best_box:
-                tracker = cv2.TrackerKCF_create()
-                tracker.init(frame, best_box)
-                cv2.rectangle(frame, (best_box[0], best_box[1]),
-                              (best_box[0] + best_box[2], best_box[1] + best_box[3]),
-                              (0, 255, 0), 2)
+                if best_box:
+                    tracker = cv2.TrackerKCF_create()
+                    tracker.init(frame, best_box)
+                    cv2.rectangle(frame, (best_box[0], best_box[1]),
+                                  (best_box[0] + best_box[2], best_box[1] + best_box[3]),
+                                  (0, 255, 0), 2)
 
-        elif tracker:
-            success, bbox = tracker.update(frame)
-            if success:
-                x, y, w_, h_ = [int(v) for v in bbox]
-                cv2.rectangle(frame, (x, y), (x + w_, y + h_), (255, 0, 0), 2)
-            else:
-                tracker = None
+            elif tracker:
+                success, bbox = tracker.update(frame)
+                if success:
+                    x, y, w_, h_ = [int(v) for v in bbox]
+                    cv2.rectangle(frame, (x, y), (x + w_, y + h_), (255, 0, 0), 2)
+                else:
+                    tracker = None
 
-        with lock:
-            output_frame = frame.copy()
+            with lock:
+                output_frame = frame.copy()
+
+        except Exception as e:
+            print("Detection/tracking error:", e)
+
 
 def generate():
     global output_frame, lock
 
     while True:
-        with lock:
-            if output_frame is None:
-                continue
-            _, buffer = cv2.imencode('.jpg', output_frame)
-            frame_bytes = buffer.tobytes()
+        try:
+            with lock:
+                if output_frame is None:
+                    continue
+                _, buffer = cv2.imencode('.jpg', output_frame)
+                frame_bytes = buffer.tobytes()
 
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            
+            time.sleep(0.05)  # ~20 FPS limit
+
+        except Exception as e:
+            print("Streaming error:", e)
+            break
+
 
 @app.route('/video_feed')
 def video_feed():
