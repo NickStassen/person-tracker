@@ -3,11 +3,6 @@ from flask import Flask, Response
 import threading
 import time
 
-"""
-Headless real-time person detection and tracking using MobileNet-SSD + KCF,
-served as an MJPEG stream on port 8000.
-"""
-
 MODEL_PATH = "MobileNetSSD_deploy.caffemodel"
 CONFIG_PATH = "MobileNetSSD_deploy.prototxt"
 CLASS_NAMES = ["background", "aeroplane", "bicycle", "bird", "boat", "bottle",
@@ -15,23 +10,24 @@ CLASS_NAMES = ["background", "aeroplane", "bicycle", "bird", "boat", "bottle",
                "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor"]
 
 CONFIDENCE_THRESHOLD = 0.5
-DETECTION_INTERVAL = 15  # Detect every N frames
+DETECTION_INTERVAL = 15
 
 net = cv2.dnn.readNetFromCaffe(CONFIG_PATH, MODEL_PATH)
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FPS, 10)  # Optional, some Pi camera drivers respect this
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+cap.set(cv2.CAP_PROP_FPS, 10)
 
 app = Flask(__name__)
 output_frame = None
 lock = threading.Lock()
-
 tracker = None
+bbox_lock = threading.Lock()
+last_bbox = None
 frame_count = 0
 
 def detect_and_track():
-    global output_frame, lock, tracker, frame_count
+    global tracker, frame_count, last_bbox
 
     while cap.isOpened():
         try:
@@ -64,45 +60,51 @@ def detect_and_track():
                 if best_box:
                     tracker = cv2.TrackerKCF_create()
                     tracker.init(frame, best_box)
-                    cv2.rectangle(frame, (best_box[0], best_box[1]),
-                                  (best_box[0] + best_box[2], best_box[1] + best_box[3]),
-                                  (0, 255, 0), 2)
+                    with bbox_lock:
+                        last_bbox = best_box
 
             elif tracker:
                 success, bbox = tracker.update(frame)
                 if success:
                     x, y, w_, h_ = [int(v) for v in bbox]
-                    cv2.rectangle(frame, (x, y), (x + w_, y + h_), (255, 0, 0), 2)
+                    with bbox_lock:
+                        last_bbox = (x, y, w_, h_)
                 else:
                     tracker = None
-
-            with lock:
-                output_frame = frame.copy()
 
         except Exception as e:
             print("Detection/tracking error:", e)
 
-
 def generate():
-    global output_frame, lock
+    global output_frame, last_bbox
 
     while True:
         try:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            # Overlay current tracking box
+            with bbox_lock:
+                if last_bbox:
+                    x, y, w, h = last_bbox
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+            # Save the current frame for web stream
             with lock:
-                if output_frame is None:
-                    continue
-                _, buffer = cv2.imencode('.jpg', output_frame)
-                frame_bytes = buffer.tobytes()
+                output_frame = frame.copy()
+
+            _, buffer = cv2.imencode('.jpg', output_frame)
+            frame_bytes = buffer.tobytes()
 
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-            
-            time.sleep(0.05)  # ~20 FPS limit
+
+            time.sleep(0.1)  # 10 FPS
 
         except Exception as e:
             print("Streaming error:", e)
             break
-
 
 @app.route('/video_feed')
 def video_feed():
@@ -132,7 +134,6 @@ def view():
     </body>
     </html>
     """
-
 
 if __name__ == '__main__':
     t = threading.Thread(target=detect_and_track)
