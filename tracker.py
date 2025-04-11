@@ -18,7 +18,7 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 cap.set(cv2.CAP_PROP_FPS, 10)
 cap.set(cv2.CAP_PROP_AUTO_WB, 0)
-cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 3000)  # May not work depending on driver
+cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 2000)  # May not work depending on driver
 cap.set(cv2.CAP_PROP_CONTRAST, 30)
 cap.set(cv2.CAP_PROP_SATURATION, 30)
 
