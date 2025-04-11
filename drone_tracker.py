@@ -1,26 +1,133 @@
-import os
-import time
-import threading
-from flask import Flask, request, jsonify, Response
-from dronekit import connect, VehicleMode, LocationGlobalRelative
 import cv2
+from flask import Flask, Response, request, jsonify
+import threading
+import time
+from dronekit import connect, VehicleMode, LocationGlobalRelative
+import numpy as np
 
-# ---------------------------- DroneKit Setup ----------------------------
+MODEL_PATH = "MobileNetSSD_deploy.caffemodel"
+CONFIG_PATH = "MobileNetSSD_deploy.prototxt"
+CLASS_NAMES = ["background", "aeroplane", "bicycle", "bird", "boat", "bottle",
+               "bus", "car", "cat", "chair", "cow", "diningtable", "dog", "horse",
+               "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor"]
 
+CONFIDENCE_THRESHOLD = 0.5
+DETECTION_INTERVAL = 15
+
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+cap.set(cv2.CAP_PROP_FPS, 10)
+cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 2000)
+cap.set(cv2.CAP_PROP_CONTRAST, 30)
+cap.set(cv2.CAP_PROP_SATURATION, 30)
+
+net = cv2.dnn.readNetFromCaffe(CONFIG_PATH, MODEL_PATH)
+
+app = Flask(__name__)
+output_frame = None
+lock = threading.Lock()
+tracker = None
+bbox_lock = threading.Lock()
+last_bbox = None
+frame_count = 0
+MODE = "gps"  # gps or vision
+
+# Connect to the vehicle
 connection_string = '/dev/ttyAMA0'
 print(f"Connecting to vehicle on: {connection_string}")
 vehicle = connect(connection_string, baud=57600, wait_ready=True)
 
-# ---------------------------- Flask App Setup ----------------------------
+def detect_and_track():
+    global tracker, frame_count, last_bbox, output_frame
 
-app = Flask(__name__)
+    while cap.isOpened():
+        try:
+            ret, frame = cap.read()
+            if not ret:
+                continue
 
-# ---------------------------- Global States ----------------------------
+            frame_count += 1
+            if MODE != "vision":
+                continue
 
-MODE = "gps"  # "gps" or "vision"
-lock = threading.Lock()
+            if frame_count % DETECTION_INTERVAL == 0 or tracker is None:
+                blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843,
+                                             (300, 300), 127.5)
+                net.setInput(blob)
+                detections = net.forward()
+                h, w = frame.shape[:2]
+                max_conf = 0
+                best_box = None
 
-# ---------------------------- Arming and Takeoff ----------------------------
+                for i in range(detections.shape[2]):
+                    confidence = detections[0, 0, i, 2]
+                    class_id = int(detections[0, 0, i, 1])
+
+                    if confidence > CONFIDENCE_THRESHOLD and CLASS_NAMES[class_id] == "person":
+                        box = detections[0, 0, i, 3:7] * [w, h, w, h]
+                        (x1, y1, x2, y2) = box.astype("int")
+                        if confidence > max_conf:
+                            max_conf = confidence
+                            best_box = (x1, y1, x2 - x1, y2 - y1)
+
+                if best_box:
+                    tracker = cv2.TrackerKCF_create()
+                    tracker.init(frame, best_box)
+                    with bbox_lock:
+                        last_bbox = best_box
+
+            elif tracker:
+                success, bbox = tracker.update(frame)
+                if success:
+                    x, y, w_, h_ = [int(v) for v in bbox]
+                    with bbox_lock:
+                        last_bbox = (x, y, w_, h_)
+                else:
+                    tracker = None
+
+        except Exception as e:
+            print("Detection/tracking error:", e)
+
+
+def generate():
+    global output_frame, last_bbox
+
+    while True:
+        try:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            with bbox_lock:
+                if MODE == "vision" and last_bbox:
+                    x, y, w, h = last_bbox
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+            with lock:
+                output_frame = frame.copy()
+
+            _, buffer = cv2.imencode('.jpg', output_frame)
+            frame_bytes = buffer.tobytes()
+
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+
+            time.sleep(0.1)  # 10 FPS
+
+        except Exception as e:
+            print("Streaming error:", e)
+            break
+
+def fly_to_location(lat, lon, alt=5):
+    if vehicle.mode.name != "GUIDED":
+        vehicle.mode = VehicleMode("GUIDED")
+        time.sleep(1)
+
+    target_location = LocationGlobalRelative(lat, lon, alt)
+    print(f"Commanding flight to: Lat {lat}, Lon {lon}, Alt {alt}")
+    vehicle.simple_goto(target_location)
 
 def arm_and_takeoff(target_altitude):
     print("Waiting for vehicle to become armable...")
@@ -29,7 +136,6 @@ def arm_and_takeoff(target_altitude):
 
     vehicle.mode = VehicleMode("GUIDED")
     vehicle.armed = True
-
     print("Arming vehicle...")
     while not vehicle.armed:
         time.sleep(1)
@@ -45,17 +151,6 @@ def arm_and_takeoff(target_altitude):
             break
         time.sleep(1)
 
-# ---------------------------- GPS Navigation ----------------------------
-
-def fly_to_location(lat, lon, alt=5):
-    if vehicle.mode.name != "GUIDED":
-        vehicle.mode = VehicleMode("GUIDED")
-        time.sleep(1)
-
-    target_location = LocationGlobalRelative(lat, lon, alt)
-    print(f"Commanding flight to: Lat {lat}, Lon {lon}, Alt {alt}")
-    vehicle.simple_goto(target_location)
-
 @app.route('/location', methods=['POST'])
 def handle_location():
     if request.is_json:
@@ -65,134 +160,53 @@ def handle_location():
         if latitude is None or longitude is None:
             return jsonify({"error": "Missing latitude or longitude"}), 400
 
-        if MODE == "gps":
-            threading.Thread(target=fly_to_location, args=(latitude, longitude)).start()
-            return jsonify({"status": "Flying to GPS location"}), 200
-        else:
-            return jsonify({"status": "Ignored due to vision mode"}), 200
-    return jsonify({"error": "Request must be JSON"}), 400
+        threading.Thread(target=fly_to_location, args=(latitude, longitude)).start()
+        return jsonify({"status": "Command received, flying to new location at 2 meters altitude"}), 200
+    else:
+        return jsonify({"error": "Request must be in JSON format"}), 400
 
 @app.route('/mode', methods=['POST'])
 def switch_mode():
     global MODE
     if request.is_json:
         data = request.get_json()
-        mode = data.get('mode')
+        mode = data.get("mode")
         if mode in ["gps", "vision"]:
             MODE = mode
-            return jsonify({"status": f"Mode switched to {MODE}"}), 200
-    return jsonify({"error": "Invalid mode or bad request"}), 400
-
-# ---------------------------- Vision Tracking ----------------------------
-
-MODEL_PATH = "MobileNetSSD_deploy.caffemodel"
-CONFIG_PATH = "MobileNetSSD_deploy.prototxt"
-CLASS_NAMES = ["background", "aeroplane", "bicycle", "bird", "boat", "bottle",
-               "bus", "car", "cat", "chair", "cow", "diningtable", "dog", "horse",
-               "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor"]
-
-CONFIDENCE_THRESHOLD = 0.5
-DETECTION_INTERVAL = 15
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-cap.set(cv2.CAP_PROP_FPS, 10)
-cap.set(cv2.CAP_PROP_AUTO_WB, 0)
-cap.set(cv2.CAP_PROP_WHITE_BALANCE_BLUE_U, 2000)
-cap.set(cv2.CAP_PROP_CONTRAST, 30)
-cap.set(cv2.CAP_PROP_SATURATION, 30)
-
-net = cv2.dnn.readNetFromCaffe(CONFIG_PATH, MODEL_PATH)
-tracker = None
-frame_count = 0
-bbox_lock = threading.Lock()
-last_bbox = None
-output_frame = None
-
-
-def detect_and_track():
-    global tracker, frame_count, last_bbox
-    while cap.isOpened():
-        try:
-            ret, frame = cap.read()
-            if not ret:
-                continue
-
-            frame_count += 1
-
-            if frame_count % DETECTION_INTERVAL == 0 or tracker is None:
-                blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843,
-                                             (300, 300), 127.5)
-                net.setInput(blob)
-                detections = net.forward()
-                h, w = frame.shape[:2]
-                max_conf = 0
-                best_box = None
-
-                for i in range(detections.shape[2]):
-                    confidence = detections[0, 0, i, 2]
-                    class_id = int(detections[0, 0, i, 1])
-                    if confidence > CONFIDENCE_THRESHOLD and CLASS_NAMES[class_id] == "person":
-                        box = detections[0, 0, i, 3:7] * [w, h, w, h]
-                        (x1, y1, x2, y2) = box.astype("int")
-                        if confidence > max_conf:
-                            max_conf = confidence
-                            best_box = (x1, y1, x2 - x1, y2 - y1)
-
-                if best_box:
-                    tracker = cv2.TrackerKCF_create()
-                    tracker.init(frame, best_box)
-                    with bbox_lock:
-                        last_bbox = best_box
-            elif tracker:
-                success, bbox = tracker.update(frame)
-                if success:
-                    with bbox_lock:
-                        last_bbox = tuple(map(int, bbox))
-                else:
-                    tracker = None
-
-            if MODE == "vision" and last_bbox:
-                cx = last_bbox[0] + last_bbox[2] // 2
-                cy = last_bbox[1] + last_bbox[3] // 2
-                offset_x = cx - frame.shape[1] // 2
-                offset_y = cy - frame.shape[0] // 2
-                print(f"[Vision] Offset: X={offset_x}, Y={offset_y}")
-                # Example use: You can add your drone movement logic here
-
-            _, buffer = cv2.imencode('.jpg', frame)
-            with lock:
-                global output_frame
-                output_frame = buffer.tobytes()
-
-        except Exception as e:
-            print("Detection/tracking error:", e)
-
+            return jsonify({"status": f"Mode switched to {mode}"}), 200
+        return jsonify({"error": "Invalid mode"}), 400
+    return jsonify({"error": "Request must be JSON"}), 400
 
 @app.route('/video_feed')
 def video_feed():
-    def generate():
-        while True:
-            with lock:
-                if output_frame:
-                    yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + output_frame + b'\r\n')
-            time.sleep(0.1)
-
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/')
 def index():
-    return "<h1>Drone Control + Video Feed</h1><p>Use /view or POST to /location or /mode</p>"
+    return "Visit /view to see the live video stream."
 
 @app.route('/view')
 def view():
-    return '''
+    return """
     <!DOCTYPE html>
-    <html><head><title>Drone Tracking</title></head>
-    <body><h1>Live Stream</h1><img src="/video_feed" width="640" height="480" /></body>
+    <html>
+    <head>
+        <title>Drone Person Tracking</title>
+        <style>
+            body { background-color: #111; color: #eee; font-family: Arial, sans-serif; text-align: center; }
+            h1 { margin-top: 20px; }
+            img { border: 2px solid #555; margin-top: 20px; }
+        </style>
+    </head>
+    <body>
+        <h1>Drone Person Tracking Stream</h1>
+        <img src="/video_feed" width="640" height="480" />
+    </body>
     </html>
-    '''
+    """
 
 if __name__ == '__main__':
-    threading.Thread(target=detect_and_track, daemon=True).start()
-    app.run(host='0.0.0.0', port=5000)
+    t = threading.Thread(target=detect_and_track)
+    t.daemon = True
+    t.start()
+    app.run(host='0.0.0.0', port=8000, threaded=True)
