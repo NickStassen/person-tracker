@@ -13,6 +13,8 @@ CLASS_NAMES = ["background", "aeroplane", "bicycle", "bird", "boat", "bottle",
 
 CONFIDENCE_THRESHOLD = 0.5
 DETECTION_INTERVAL = 15
+CENTER_TOLERANCE = 30
+ADJUSTMENT_STEP = 0.00002
 
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
@@ -84,6 +86,28 @@ def detect_and_track():
                     x, y, w_, h_ = [int(v) for v in bbox]
                     with bbox_lock:
                         last_bbox = (x, y, w_, h_)
+
+                    # Move drone to center person in frame
+                    cx = x + w_ // 2
+                    cy = y + h_ // 2
+                    frame_center_x = frame.shape[1] // 2
+                    frame_center_y = frame.shape[0] // 2
+                    dx = cx - frame_center_x
+                    dy = cy - frame_center_y
+
+                    if abs(dx) > CENTER_TOLERANCE or abs(dy) > CENTER_TOLERANCE:
+                        current_location = vehicle.location.global_relative_frame
+                        new_lat = current_location.lat
+                        new_lon = current_location.lon
+
+                        if abs(dx) > CENTER_TOLERANCE:
+                            new_lon += ADJUSTMENT_STEP if dx > 0 else -ADJUSTMENT_STEP
+                        if abs(dy) > CENTER_TOLERANCE:
+                            new_lat -= ADJUSTMENT_STEP if dy > 0 else -ADJUSTMENT_STEP
+
+                        target = LocationGlobalRelative(new_lat, new_lon, current_location.alt)
+                        vehicle.simple_goto(target)
+
                 else:
                     tracker = None
 
