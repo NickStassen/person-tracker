@@ -143,7 +143,7 @@ def detect_and_track() -> None:
                 continue
 
             frame_count += 1
-            if MODE != "Follow":
+            if MODE != "follow":
                 continue
 
             if frame_count % DETECTION_INTERVAL == 0 or tracker is None:
@@ -216,7 +216,7 @@ def generate() -> bytes:
                 continue
 
             with bbox_lock:
-                if MODE == "Follow" and last_bbox:
+                if MODE == "follow" and last_bbox:
                     x, y, w, h = last_bbox
                     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
@@ -279,7 +279,11 @@ def arm_and_takeoff(target_altitude: float) -> None:
 # ---------------------- Flask Endpoints ---------------------- #
 @app.route('/location', methods=['POST'])
 def handle_location():
+    global MODE
     if request.is_json:
+        if MODE != "gps":
+            return jsonify({"error": "Location command only works in GPS mode"}), 400
+
         data = request.get_json()
         latitude = data.get('latitude')
         longitude = data.get('longitude')
@@ -295,14 +299,15 @@ def handle_location():
 def switch_mode():
     global MODE
     if request.is_json:
+        print(f"Received command: {request.data}")
         data = request.get_json()
         mode = data.get("command")
-        if mode in ["Follow", "Standby"]:
+        if mode in ["follow", "standby"]:
             MODE = mode
-            if mode == "Standby":
+            if mode == "standby":
                 # Switch to LOITER so the drone holds its position
                 vehicle.mode = VehicleMode("LOITER")
-            else:  # Follow mode
+            else:  # follow mode
                 vehicle.mode = VehicleMode("GUIDED")
             return jsonify({"status": f"Mode switched to {mode}"}), 200
         return jsonify({"error": "Invalid mode"}), 400
