@@ -143,7 +143,7 @@ def detect_and_track() -> None:
                 continue
 
             frame_count += 1
-            if MODE != "vision":
+            if MODE != "Follow":
                 continue
 
             if frame_count % DETECTION_INTERVAL == 0 or tracker is None:
@@ -216,7 +216,7 @@ def generate() -> bytes:
                 continue
 
             with bbox_lock:
-                if MODE == "vision" and last_bbox:
+                if MODE == "Follow" and last_bbox:
                     x, y, w, h = last_bbox
                     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
@@ -291,17 +291,23 @@ def handle_location():
     else:
         return jsonify({"error": "Request must be in JSON format"}), 400
 
-@app.route('/mode', methods=['POST'])
+@app.route('/command', methods=['POST'])
 def switch_mode():
     global MODE
     if request.is_json:
         data = request.get_json()
-        mode = data.get("mode")
-        if mode in ["gps", "vision"]:
+        mode = data.get("command")
+        if mode in ["Follow", "Standby"]:
             MODE = mode
+            if mode == "Standby":
+                # Switch to LOITER so the drone holds its position
+                vehicle.mode = VehicleMode("LOITER")
+            else:  # Follow mode
+                vehicle.mode = VehicleMode("GUIDED")
             return jsonify({"status": f"Mode switched to {mode}"}), 200
         return jsonify({"error": "Invalid mode"}), 400
     return jsonify({"error": "Request must be JSON"}), 400
+
 
 @app.route('/video_feed')
 def video_feed():
