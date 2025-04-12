@@ -1,10 +1,96 @@
+#!/usr/bin/env python3
+"""
+Drone Control with Ultrasonic Sensors Integration
+
+This script integrates ultrasonic sensors into the drone control
+application. Two ultrasonic sensors are used: one facing forward
+(for detecting objects ahead) and one facing upward (for detecting
+the ceiling). Their readings are acquired continuously in a separate
+thread. The script also performs person detection/tracking using a
+computer vision model, provides a Flask-based web interface for
+video streaming and flight commands, and uses DroneKit for vehicle control.
+
+Requirements:
+- RPi.GPIO for ultrasonic sensor communication.
+- OpenCV for computer vision tasks.
+- DroneKit for interacting with the vehicle.
+- Flask for the web server.
+"""
+
+import RPi.GPIO as GPIO
+import time
 import cv2
 from flask import Flask, Response, request, jsonify
 import threading
-import time
-from dronekit import connect, VehicleMode, LocationGlobalRelative
 import numpy as np
+from dronekit import connect, VehicleMode, LocationGlobalRelative
 
+# ---------------------- Ultrasonic Sensor Setup ---------------------- #
+# Sensor facing forward (for obstacle detection)
+TRIG_PIN_FORWARD = 23
+ECHO_PIN_FORWARD = 24
+
+# Sensor facing upward (for ceiling detection)
+TRIG_PIN_UP = 17
+ECHO_PIN_UP = 27
+
+# Setup GPIO for ultrasonic sensors
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(TRIG_PIN_FORWARD, GPIO.OUT)
+GPIO.setup(ECHO_PIN_FORWARD, GPIO.IN)
+GPIO.setup(TRIG_PIN_UP, GPIO.OUT)
+GPIO.setup(ECHO_PIN_UP, GPIO.IN)
+
+def measure_distance(trig_pin: int, echo_pin: int) -> tuple:
+    """
+    Measure distance using an ultrasonic sensor.
+
+    Args:
+        trig_pin (int): GPIO pin connected to the sensor trigger.
+        echo_pin (int): GPIO pin connected to the sensor echo.
+
+    Returns:
+        tuple: A tuple containing the measured distance in meters and feet.
+    """
+    # Trigger a 10µs pulse
+    GPIO.output(trig_pin, True)
+    time.sleep(0.00001)
+    GPIO.output(trig_pin, False)
+
+    # Wait for the echo to start
+    pulse_start = time.time()
+    while GPIO.input(echo_pin) == 0:
+        pulse_start = time.time()
+
+    # Wait for the echo to end
+    pulse_end = time.time()
+    while GPIO.input(echo_pin) == 1:
+        pulse_end = time.time()
+
+    pulse_duration = pulse_end - pulse_start
+    distance_meters = (pulse_duration * 343) / 2  # Speed of sound = 343 m/s
+    distance_feet = distance_meters * 3.28084
+    return distance_meters, distance_feet
+
+# Global variables to store sensor readings
+front_sensor_distance = (0.0, 0.0)
+up_sensor_distance = (0.0, 0.0)
+
+def ultrasonic_loop() -> None:
+    """
+    Continuously measure distances from both ultrasonic sensors.
+
+    Updates global variables with the current measured values and prints the readings.
+    """
+    global front_sensor_distance, up_sensor_distance
+    while True:
+        front_sensor_distance = measure_distance(TRIG_PIN_FORWARD, ECHO_PIN_FORWARD)
+        up_sensor_distance = measure_distance(TRIG_PIN_UP, ECHO_PIN_UP)
+        print(f"Front Sensor: {front_sensor_distance[0]:.2f} m, {front_sensor_distance[1]:.2f} ft")
+        print(f"Up Sensor: {up_sensor_distance[0]:.2f} m, {up_sensor_distance[1]:.2f} ft")
+        time.sleep(2)  # Adjust the delay as necessary
+
+# ---------------------- Drone Vision & Control Setup ---------------------- #
 MODEL_PATH = "MobileNetSSD_deploy.caffemodel"
 CONFIG_PATH = "MobileNetSSD_deploy.prototxt"
 CLASS_NAMES = ["background", "aeroplane", "bicycle", "bird", "boat", "bottle",
@@ -34,16 +120,22 @@ tracker = None
 bbox_lock = threading.Lock()
 last_bbox = None
 frame_count = 0
-MODE = "gps"  # gps or vision
+MODE = "gps"  # Modes: "gps" or "vision"
 
 # Connect to the vehicle
 connection_string = '/dev/ttyAMA0'
 print(f"Connecting to vehicle on: {connection_string}")
 vehicle = connect(connection_string, baud=57600, wait_ready=True)
 
-def detect_and_track():
-    global tracker, frame_count, last_bbox, output_frame
+def detect_and_track() -> None:
+    """
+    Detect and track a person using the vision system.
 
+    Every DETECTION_INTERVAL frames the network performs a detection. Between detections,
+    a tracker is used to follow the person. If the person is off-center,
+    the drone’s location is updated accordingly.
+    """
+    global tracker, frame_count, last_bbox, output_frame
     while cap.isOpened():
         try:
             ret, frame = cap.read()
@@ -66,7 +158,6 @@ def detect_and_track():
                 for i in range(detections.shape[2]):
                     confidence = detections[0, 0, i, 2]
                     class_id = int(detections[0, 0, i, 1])
-
                     if confidence > CONFIDENCE_THRESHOLD and CLASS_NAMES[class_id] == "person":
                         box = detections[0, 0, i, 3:7] * [w, h, w, h]
                         (x1, y1, x2, y2) = box.astype("int")
@@ -79,15 +170,13 @@ def detect_and_track():
                     tracker.init(frame, best_box)
                     with bbox_lock:
                         last_bbox = best_box
-
             elif tracker:
                 success, bbox = tracker.update(frame)
                 if success:
                     x, y, w_, h_ = [int(v) for v in bbox]
                     with bbox_lock:
                         last_bbox = (x, y, w_, h_)
-
-                    # Move drone to center person in frame
+                    # Center tracking adjustment
                     cx = x + w_ // 2
                     cy = y + h_ // 2
                     frame_center_x = frame.shape[1] // 2
@@ -107,17 +196,19 @@ def detect_and_track():
 
                         target = LocationGlobalRelative(new_lat, new_lon, current_location.alt)
                         vehicle.simple_goto(target)
-
                 else:
                     tracker = None
-
         except Exception as e:
             print("Detection/tracking error:", e)
 
+def generate() -> bytes:
+    """
+    Generate a video stream by encoding frames as JPEG images.
 
-def generate():
+    Returns:
+        A byte stream yielding the video frames.
+    """
     global output_frame, last_bbox
-
     while True:
         try:
             ret, frame = cap.read()
@@ -134,17 +225,22 @@ def generate():
 
             _, buffer = cv2.imencode('.jpg', output_frame)
             frame_bytes = buffer.tobytes()
-
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-
-            time.sleep(0.1)  # 10 FPS
-
+            time.sleep(0.1)
         except Exception as e:
             print("Streaming error:", e)
             break
 
-def fly_to_location(lat, lon, alt=5):
+def fly_to_location(lat: float, lon: float, alt: float = 5) -> None:
+    """
+    Command the vehicle to fly to a specified location.
+
+    Args:
+        lat (float): Target latitude.
+        lon (float): Target longitude.
+        alt (float, optional): Target altitude. Defaults to 5.
+    """
     if vehicle.mode.name != "GUIDED":
         vehicle.mode = VehicleMode("GUIDED")
         time.sleep(1)
@@ -153,7 +249,13 @@ def fly_to_location(lat, lon, alt=5):
     print(f"Commanding flight to: Lat {lat}, Lon {lon}, Alt {alt}")
     vehicle.simple_goto(target_location)
 
-def arm_and_takeoff(target_altitude):
+def arm_and_takeoff(target_altitude: float) -> None:
+    """
+    Arm the vehicle and take off to a target altitude.
+
+    Args:
+        target_altitude (float): The target altitude to reach.
+    """
     print("Waiting for vehicle to become armable...")
     while not vehicle.is_armable:
         time.sleep(1)
@@ -166,7 +268,6 @@ def arm_and_takeoff(target_altitude):
 
     print("Taking off!")
     vehicle.simple_takeoff(target_altitude)
-
     while True:
         current_alt = vehicle.location.global_relative_frame.alt
         print(f"Current altitude: {current_alt:.2f} m")
@@ -175,6 +276,7 @@ def arm_and_takeoff(target_altitude):
             break
         time.sleep(1)
 
+# ---------------------- Flask Endpoints ---------------------- #
 @app.route('/location', methods=['POST'])
 def handle_location():
     if request.is_json:
@@ -229,8 +331,20 @@ def view():
     </html>
     """
 
+# ---------------------- Main Execution ---------------------- #
 if __name__ == '__main__':
-    t = threading.Thread(target=detect_and_track)
-    t.daemon = True
-    t.start()
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    try:
+        # Start ultrasonic sensor polling thread
+        ultrasonic_thread = threading.Thread(target=ultrasonic_loop, daemon=True)
+        ultrasonic_thread.start()
+
+        # Start the person detection and tracking thread
+        tracking_thread = threading.Thread(target=detect_and_track, daemon=True)
+        tracking_thread.start()
+
+        # Run the Flask web server
+        app.run(host='0.0.0.0', port=5000, threaded=True)
+    except KeyboardInterrupt:
+        print("Program interrupted by user.")
+    finally:
+        GPIO.cleanup()
