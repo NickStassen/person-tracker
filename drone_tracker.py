@@ -331,13 +331,11 @@ def view():
         <title>Drone Person Tracking</title>
         <style>
             body { background-color: #111; color: #eee; font-family: Arial, sans-serif; text-align: center; }
-            h1 { margin-top: 20px; }
             img { border: 2px solid #555; margin-top: 20px; }
         </style>
     </head>
     <body>
-        <h1>Drone Person Tracking Stream</h1>
-        <img src="/video_feed" width="640" height="480" />
+        <img src="/video_feed" width="320" height="240" />
     </body>
     </html>
     """
