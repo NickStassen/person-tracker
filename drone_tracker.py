@@ -240,7 +240,7 @@ def detect_and_track() -> None:
                         print(
                             f"Adjusting target: Δlat {ADJUSTMENT_STEP * global_error_lat:.6f}, Δlon {ADJUSTMENT_STEP * global_error_lon:.6f}"
                         )
-                        vehicle.simple_goto(target)
+                        # vehicle.simple_goto(target)
                 else:
                     tracker = None
         except Exception as e:
@@ -278,14 +278,14 @@ def generate() -> bytes:
             break
 
 
-def fly_to_location(lat: float, lon: float, alt: float = 5) -> None:
+def fly_to_location(lat: float, lon: float, alt: float = 3) -> None:
     """
     Command the vehicle to fly to a specified location.
 
     Args:
         lat (float): Target latitude.
         lon (float): Target longitude.
-        alt (float, optional): Target altitude. Defaults to 5.
+        alt (float, optional): Target altitude. Defaults to 3.
     """
     if vehicle.mode.name != "GUIDED":
         vehicle.mode = VehicleMode("GUIDED")
@@ -334,7 +334,7 @@ def handle_location():
         longitude = data.get("longitude")
         if latitude is None or longitude is None:
             return jsonify({"error": "Missing latitude or longitude"}), 400
-        threading.Thread(target=fly_to_location, args=(latitude, longitude)).start()
+        # threading.Thread(target=fly_to_location, args=(latitude, longitude)).start()
         return (
             jsonify(
                 {
@@ -365,7 +365,7 @@ def switch_mode():
                 # If follow was pressed twice, toggle between GPS and vision follow
                 if old_mode == "follow":
                     GPS_FOLLOW = not GPS_FOLLOW
-                vehicle.mode = VehicleMode("GUIDED")
+                # vehicle.mode = VehicleMode("GUIDED")
             return jsonify({"status": f"Mode switched to {mode}"}), 200
         return jsonify({"error": "Invalid mode"}), 400
     return jsonify({"error": "Request must be JSON"}), 400
