@@ -327,7 +327,7 @@ def handle_location():
     global MODE
     global GPS_FOLLOW
     if request.is_json:
-        if MODE != "follow" or not GPS_FOLLOW:
+        if MODE != "follow":
             return jsonify({"error": "Location command only works in GPS mode"}), 400
         data = request.get_json()
         latitude = data.get("latitude")
